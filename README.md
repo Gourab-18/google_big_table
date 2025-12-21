@@ -1,3 +1,7 @@
 # Google Big Table
 
-This project is connected to [https://github.com/Gourab-18/google_big_table](https://github.com/Gourab-18/google_big_table).
+
+
+
+Implementation of Google Big Table using Golang.
+[Google Big Table](https://research.google.com/archive/bigtable-osdi06.pdf)
