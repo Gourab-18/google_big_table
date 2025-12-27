@@ -9,14 +9,16 @@ import (
 // MemTable represents the in-memory buffer of mutations (LSM tree component).
 // It maintains rows in sorted order using a B-Tree.
 type MemTable struct {
-	mu   sync.RWMutex
-	tree *btree.BTree
+	mu        sync.RWMutex
+	tree      *btree.BTree
+	SizeBytes int64
 }
 
 // NewMemTable creates a new MemTable.
 func NewMemTable() *MemTable {
 	return &MemTable{
-		tree: btree.New(32), // 32 is a typical degree for in-memory B-Trees
+		tree:      btree.New(32),
+		SizeBytes: 0,
 	}
 }
 
@@ -43,14 +45,25 @@ func (m *MemTable) Apply(mutation *RowMutation) error {
 	if item == nil {
 		row = NewRow(mutation.RowKey)
 		m.tree.ReplaceOrInsert(rowItem{Row: row})
+		m.SizeBytes += int64(len(mutation.RowKey))
 	} else {
 		row = item.(rowItem).Row
 	}
 
 	// 2. Apply the mutation to the row
+	m.SizeBytes += estimateMutationSize(mutation)
+	
 	// Since we hold the MemTable lock, this entire operation is atomic
 	// with respect to other MemTable operations.
 	return row.Apply(mutation)
+}
+
+func estimateMutationSize(m *RowMutation) int64 {
+	var size int64
+	for _, op := range m.Ops {
+		size += int64(len(op.Family) + len(op.Qualifier) + len(op.Value) + 8) // +8 for timestamp
+	}
+	return size
 }
 
 // Get retrieves a row from the MemTable.
