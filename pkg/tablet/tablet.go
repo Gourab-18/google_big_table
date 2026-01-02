@@ -35,17 +35,42 @@ func NewTablet(start, end, dir string) (*Tablet, error) {
 		return nil, err
 	}
 
-	// TODO: Load existing SSTables and replay WAL on real recovery.
-	// For this step, we assume fresh or just minimal init.
+	// Recovery: Load existing SSTables
+	var sstables []SSTableMetadata
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
 
-	return &Tablet{
+	for _, f := range files {
+		if filepath.Ext(f.Name()) == ".sst" {
+			sstables = append(sstables, SSTableMetadata{Path: filepath.Join(dir, f.Name())})
+		}
+	}
+
+	t := &Tablet{
 		StartKey:  start,
 		EndKey:    end,
 		Dir:       dir,
 		MemTable:  NewMemTable(),
 		CommitLog: cl,
-		SSTables:  make([]SSTableMetadata, 0),
-	}, nil
+		SSTables:  sstables,
+	}
+
+	// Recovery: Replay WAL
+	mutations, err := cl.Recover()
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover WAL: %w", err)
+	}
+
+	// Replay mutations into MemTable (restore state)
+	for _, m := range mutations {
+		if err := t.MemTable.Apply(m); err != nil {
+			return nil, fmt.Errorf("failed to replay mutation: %w", err)
+		}
+	}
+
+	return t, nil
 }
 
 // Mutate applies a mutation to the tablet.
@@ -69,6 +94,58 @@ func (t *Tablet) Mutate(m *RowMutation) error {
 	}
 
 	return nil
+}
+
+// Read returns the latest value for a specific column.
+// It checks MemTable and all SSTables.
+func (t *Tablet) Read(rowKey, family, qualifier string) (*CellVersion, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if !t.InRange(rowKey) {
+		return nil, fmt.Errorf("key '%s' out of range [%s, %s)", rowKey, t.StartKey, t.EndKey)
+	}
+
+	var candidates []CellVersion
+
+	// 1. Check MemTable
+	if row := t.MemTable.Get(rowKey); row != nil {
+		if ver := row.Get(family, qualifier); ver != nil {
+			candidates = append(candidates, *ver)
+		}
+	}
+
+	// 2. Check SSTables (Expensive scan)
+	for _, sst := range t.SSTables {
+		// Optimization: We could keep Bloom Filters or Start/End keys per SSTable
+		rows, err := ReadSSTable(sst.Path)
+		if err != nil {
+			// Log error but maybe continue? failure is safer
+			return nil, fmt.Errorf("failed to read sstable %s: %w", sst.Path, err)
+		}
+		for _, r := range rows {
+			if r.Key == rowKey {
+				if ver := r.Get(family, qualifier); ver != nil {
+					candidates = append(candidates, *ver)
+				}
+				break // Found row in this SSTable
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, nil // Not found
+	}
+
+	// 3. Find latest
+	var best *CellVersion
+	for i := range candidates {
+		if best == nil || candidates[i].Timestamp > best.Timestamp {
+			best = &candidates[i]
+		}
+	}
+
+	return best, nil
 }
 
 // InRange checks if a key belongs to this tablet.

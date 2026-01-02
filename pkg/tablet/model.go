@@ -3,6 +3,7 @@ package tablet
 import (
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -64,6 +65,7 @@ func (c *Column) GetLatest() *CellVersion {
 
 // Row represents a single row in the table.
 type Row struct {
+	mu      sync.RWMutex
 	Key     string
 	Columns map[string]*Column // Key is "Family:Qualifier"
 }
@@ -78,6 +80,9 @@ func NewRow(key string) *Row {
 
 // Set adds a value to a specific column family and qualifier.
 func (r *Row) Set(family, qualifier string, timestamp int64, value []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	
 	colKey := family + ":" + qualifier
 	col, exists := r.Columns[colKey]
 	if !exists {
@@ -89,12 +94,18 @@ func (r *Row) Set(family, qualifier string, timestamp int64, value []byte) {
 
 // DeleteColumn deletes all data for a specific column.
 func (r *Row) DeleteColumn(family, qualifier string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	colKey := family + ":" + qualifier
 	delete(r.Columns, colKey)
 }
 
 // Get returns the latest value for a specific column.
 func (r *Row) Get(family, qualifier string) *CellVersion {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	colKey := family + ":" + qualifier
 	col, exists := r.Columns[colKey]
 	if !exists {
@@ -161,14 +172,37 @@ func (r *Row) Apply(m *RowMutation) error {
 		return fmt.Errorf("mutation row key %s does not match row key %s", m.RowKey, r.Key)
 	}
 
-	// In a concurrent environment, we would lock the row here.
+	// Lock the row for the entire duration of the mutation batch to ensure atomicity.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	for _, op := range m.Ops {
 		switch op.Type {
 		case MutationSet:
-			r.Set(op.Family, op.Qualifier, op.Timestamp, op.Value)
+			// We duplicate internal Set logic here to avoid recursive locking
+			// or we could split Set into locked/unlocked versions.
+			// Ideally call unlocked version.
+			r.setInternal(op.Family, op.Qualifier, op.Timestamp, op.Value)
 		case MutationDelete:
-			r.DeleteColumn(op.Family, op.Qualifier)
+			r.deleteInternal(op.Family, op.Qualifier)
 		}
 	}
 	return nil
+}
+
+// setInternal matches Set but assumes lock is held.
+func (r *Row) setInternal(family, qualifier string, timestamp int64, value []byte) {
+	colKey := family + ":" + qualifier
+	col, exists := r.Columns[colKey]
+	if !exists {
+		col = NewColumn(family, qualifier)
+		r.Columns[colKey] = col
+	}
+	col.Insert(timestamp, value)
+}
+
+// deleteInternal matches DeleteColumn but assumes lock is held.
+func (r *Row) deleteInternal(family, qualifier string) {
+	colKey := family + ":" + qualifier
+	delete(r.Columns, colKey)
 }

@@ -29,8 +29,8 @@ func (m *MemTable) Flush(path string) (*SSTableMetadata, error) {
 	// Iterate over the BTree and write rows
 	// btree.Ascend is in-order traversal (sorted by key)
 	var writeErr error
-	m.tree.Ascend(func(i btree.Item) bool {
-		row := i.(rowItem).Row
+	m.Tree.Ascend(func(i btree.Item) bool {
+		row := i.(RowItem).Row
 		if err := enc.Encode(row); err != nil {
 			writeErr = err
 			return false // stop iteration
@@ -43,7 +43,8 @@ func (m *MemTable) Flush(path string) (*SSTableMetadata, error) {
 	}
 
 	// Clear MemTable
-	m.tree.Clear(false)
+	m.Tree.Clear(false)
+	m.SizeBytes = 0
 
 	return &SSTableMetadata{Path: path}, nil
 }

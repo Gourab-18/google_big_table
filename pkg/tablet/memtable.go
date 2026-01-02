@@ -10,27 +10,27 @@ import (
 // It maintains rows in sorted order using a B-Tree.
 type MemTable struct {
 	mu        sync.RWMutex
-	tree      *btree.BTree
+	Tree      *btree.BTree
 	SizeBytes int64
 }
 
 // NewMemTable creates a new MemTable.
 func NewMemTable() *MemTable {
 	return &MemTable{
-		tree:      btree.New(32),
+		Tree:      btree.New(32),
 		SizeBytes: 0,
 	}
 }
 
-// rowItem is a wrapper for Row to implement the btree.Item interface.
-type rowItem struct {
+// RowItem is a wrapper for Row to implement the btree.Item interface.
+type RowItem struct {
 	*Row
 }
 
 // Less implements btree.Item.
 // It orders rows lexicographically by their Key.
-func (r rowItem) Less(than btree.Item) bool {
-	return r.Row.Key < than.(rowItem).Row.Key
+func (r RowItem) Less(than btree.Item) bool {
+	return r.Row.Key < than.(RowItem).Row.Key
 }
 
 // Apply applies a mutation to the MemTable.
@@ -41,18 +41,18 @@ func (m *MemTable) Apply(mutation *RowMutation) error {
 
 	// 1. Find or create the row
 	var row *Row
-	item := m.tree.Get(rowItem{Row: &Row{Key: mutation.RowKey}})
+	item := m.Tree.Get(RowItem{Row: &Row{Key: mutation.RowKey}})
 	if item == nil {
 		row = NewRow(mutation.RowKey)
-		m.tree.ReplaceOrInsert(rowItem{Row: row})
+		m.Tree.ReplaceOrInsert(RowItem{Row: row})
 		m.SizeBytes += int64(len(mutation.RowKey))
 	} else {
-		row = item.(rowItem).Row
+		row = item.(RowItem).Row
 	}
 
 	// 2. Apply the mutation to the row
 	m.SizeBytes += estimateMutationSize(mutation)
-	
+
 	// Since we hold the MemTable lock, this entire operation is atomic
 	// with respect to other MemTable operations.
 	return row.Apply(mutation)
@@ -71,7 +71,7 @@ func (m *MemTable) Get(key string) *Row {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	item := m.tree.Get(rowItem{Row: &Row{Key: key}})
+	item := m.Tree.Get(RowItem{Row: &Row{Key: key}})
 	if item == nil {
 		return nil
 	}
@@ -82,5 +82,5 @@ func (m *MemTable) Get(key string) *Row {
 	// individually locked, but MemTable access is.
 	// However, this means the caller MUST NOT hold this pointer long-term while others write.
 	// To be safer, let's deep copy broadly or just rely on 'Apply' locking for now.
-	return item.(rowItem).Row
+	return item.(RowItem).Row
 }
